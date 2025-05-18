@@ -1,3 +1,14 @@
+# This file is a modified version of the original ComBat function from the sva package.
+# The original code is licensed under the Artistic License 2.0.
+# This modified version is also distributed under the same license.
+# See: https://opensource.org/licenses/Artistic-2.0
+#
+# Original citation:
+# Leek JT, Johnson WE, Parker HS, Fertig EJ, Jaffe AE, Zhang Y, Storey JD, Torres LC (2025). sva: Surrogate Variable Analysis. doi:10.18129/B9.bioc.sva, R package version 3.56.0, https://bioconductor.org/packages/sva.
+# Citation of this modification:
+# Tomo Y. & Nakaki R. (2025). iComBat: An Incremental Framework for Batch Effect Correction in DNA Methylation Array Data. doi:10.1101/2025.05.06.652337, bioRxiv. 
+
+
 library(matrixStats)
 library(BiocParallel)
 library(sva)
