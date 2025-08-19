@@ -9,7 +9,7 @@ iComBat extends the standard ComBat method by allowing new batches to be correct
 ## Requirements
 
 - R ≥ 4.2
-- CRAN / Bioconductor packages: `sva` `matrixStats` `BiocParallel`
+- CRAN / Bioconductor packages: `matrixStats`
 
 ## License
 
