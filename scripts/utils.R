@@ -40,7 +40,6 @@ decompress_idat_gz <- function(base_dir = getwd()) {
   }
   invisible(TRUE)
 }
-decompress_idat_gz(getwd())
 
 check_PC_covariate_association <- function(pca_data, pcs = c("PC1","PC2","PC3"), covariates = c("Age","Sex","Batch")) {
   results <- list()
