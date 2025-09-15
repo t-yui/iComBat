@@ -1,166 +1,462 @@
-source("/path_to_directory/iComBat/scripts/icombat.R")
+source("icombat.R")
+source("utils.R")
+
+suppressPackageStartupMessages({
+  library(sva)
+  library(matrixStats)
+  library(BiocParallel)
+  library(jsonlite)
+})
+
+get_pvalues_age <- function(data, group, age) {
+  pvals <- apply(data, 1, function(x) {
+    fit <- summary(lm(x ~ group + age))
+    pf <- pf((fit$coefficients[2, "t value"])^2, 1, fit$df[2], lower.tail = FALSE)
+    return(pf)
+  })
+  return(pvals)
+}
 
 # data generation
-generateTestDataExperiment <- function(
-    G = 500,
-    batch_sizes,
-    batch_means,
-    batch_sds,
-    global_mean = 5,
-    global_sd = 1,
-    Delta_value = 0.5,
-    seed = NULL) {
+generateDataFlex <- function(
+  G = 500,
+  batch_sizes,
+  batch_means,
+  batch_sds,
+  case_prob,
+  global_mean = 5,
+  global_sd = 1,
+  Delta_value = 0.5,
+  age_mu = 50,
+  age_sd = 10,
+  age_beta = 0.02,
+  seed = NULL) {
+  
   if (!is.null(seed)) set.seed(seed)
   total_samples <- sum(batch_sizes)
   dat <- matrix(NA, nrow = G, ncol = total_samples)
   batch <- numeric(total_samples)
   group <- numeric(total_samples)
+  age <- rnorm(total_samples, mean = age_mu, sd = age_sd)
+  
+  Delta <- c(rep(Delta_value, min(50, G)), rep(0, G - min(50, G)))
+  Age_beta <- c(rep(age_beta, G))
+  
   start_idx <- 1
-  Delta <- c(rep(Delta_value, min(50, G)), rep(0, G - min(50, G))) # 群効果: 最初の50遺伝子のみ
   for (k in seq_along(batch_sizes)) {
     nk <- batch_sizes[k]
-    end_idx <- start_idx + nk - 1
-    grp <- sample(rep(0:1, length.out = nk))
-    base_expr <- matrix(rnorm(G * nk, mean = global_mean, sd = global_sd), nrow = G, ncol = nk)
-    dat[, start_idx:end_idx] <- (base_expr + batch_means[k] + Delta %*% t(as.matrix(grp))) * batch_sds[k]
-    batch[start_idx:end_idx] <- k
-    group[start_idx:end_idx] <- grp
-    start_idx <- end_idx + 1
+    idx <- start_idx:(start_idx + nk - 1)
+    grp <- rbinom(nk, 1, prob = case_prob[k])
+    base <- matrix(rnorm(G * nk, mean = global_mean, sd = global_sd), nrow = G)
+    dat[, idx] <- (base + batch_means[k] + Delta %*% t(as.matrix(grp)) +
+                     Age_beta %*% t(as.matrix(age[idx]))) * batch_sds[k]
+    batch[idx] <- k
+    group[idx] <- grp
+    start_idx <- start_idx + nk
   }
-  batch <- factor(batch, levels = seq_along(batch_sizes))
-  group <- factor(group, levels = c(0, 1))
-  list(dat = dat, batch = batch, group = group, true_G = G, true_N = total_samples)
+  list(dat = dat,
+       batch = factor(batch),
+       group = factor(group, levels = c(0, 1)),
+       age = age)
 }
 
-# get p values by welch's t-test
-get_pvalues <- function(data, group) {
-  pvals <- apply(data, 1, function(x) {
-    t.test(x ~ group)$p.value
-  })
-  return(pvals)
+# scenario settings
+G <- 500
+Delta_value <- 0.5
+global_mean <- 5
+global_sd <- 1
+age_mu <- 50
+age_sd <- 10
+
+systematic_scenarios <- list(
+  # Basic scenario
+  S01 = list(
+    name = "Baseline",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+  
+  # Case-Control imbalance scenarios
+  S02 = list(
+    name = "Mild imbalance",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.3, 0.7, 0.4, 0.6),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+  
+  S03 = list(
+    name = "Extreme imbalance",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.1, 0.9, 0.2, 0.8),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+  
+  # Sample size variations
+  S04 = list(
+    name = "Small samples",
+    batch_sizes = c(25, 15, 20, 15),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+  
+  S05 = list(
+    name = "Large samples",
+    batch_sizes = c(250, 150, 200, 150),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+
+  S06 = list(
+    name = "Mixed sizes",
+    batch_sizes = c(200, 10, 50, 100),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 3
+  ),
+  
+  # Batch number variations
+  S07 = list(
+    name = "Few batches (2+1)",
+    batch_sizes = c(50, 30, 40),
+    batch_means = c(0, 2.5, -2),
+    batch_sds = c(1, 1.5, 1.2),
+    case_prob = c(0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 2
+  ),
+  
+  S08 = list(
+    name = "Many batches (6+3)",
+    batch_sizes = c(20, 20, 20, 20, 20, 20, 15, 15, 15),
+    batch_means = c(0, 0.5, 1, -0.5, -1, 1.5, -2, 2.5, -3),
+    batch_sds = c(1, 1.1, 1.2, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6),
+    case_prob = c(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.01,
+    n_old_batches = 6
+  ),
+  
+  # Strong covariate effect
+  S09 = list(
+    name = "Strong covariate",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 0.1,
+    n_old_batches = 3
+  ),
+
+  S10 = list(
+    name = "Extremely Strong covariate",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.5, 0.5, 0.5, 0.5),
+    age_beta = 1.0,
+    n_old_batches = 3
+  ),
+  
+  # Complex scenarios
+  S11 = list(
+    name = "Imbalance + Strong covariate",
+    batch_sizes = c(50, 30, 40, 30),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.3, 0.7, 0.4, 0.6),
+    age_beta = 0.10,
+    n_old_batches = 3
+  ),
+  
+  S12 = list(
+    name = "Imbalance + Strong covariate + Small samples",
+    batch_sizes = c(25, 15, 20, 15),
+    batch_means = c(0, 2.5, -2, -4),
+    batch_sds = c(1, 1.5, 1.2, 1.8),
+    case_prob = c(0.3, 0.7, 0.4, 0.6),
+    age_beta = 0.10,
+    n_old_batches = 3
+  ),
+  
+  S13 = list(
+    name = "Imbalance + Strong covariate + Small samples + Few batches",
+    batch_sizes = c(25, 15, 20),
+    batch_means = c(0, 2.5, -2),
+    batch_sds = c(1, 1.5, 1.2),
+    case_prob = c(0.3, 0.7, 0.4),
+    age_beta = 0.10,
+    n_old_batches = 2
+  )
+)
+
+run_scenario_simulation <- function(scenario, n_rep = 1000, alpha = 0.05) {
+  cat(sprintf("\nRunning scenario: %s\n", scenario$name))
+  
+  TPR_raw <- FPR_raw <- numeric(n_rep)
+  TPR_full <- FPR_full <- numeric(n_rep)
+  TPR_incr <- FPR_incr <- numeric(n_rep)
+  lambda_raw <- lambda_full <- lambda_incr <- numeric(n_rep)
+  nsv_raw <- nsv_full <- nsv_incr <- numeric(n_rep)
+  correlation_vals <- numeric(n_rep)
+  
+  n_old <- scenario$n_old_batches
+  batch_sizes_old <- scenario$batch_sizes[1:n_old]
+  batch_means_old <- scenario$batch_means[1:n_old]
+  batch_sds_old <- scenario$batch_sds[1:n_old]
+  case_prob_old <- scenario$case_prob[1:n_old]
+  
+  batch_sizes_new <- scenario$batch_sizes[(n_old + 1):length(scenario$batch_sizes)]
+  batch_means_new <- scenario$batch_means[(n_old + 1):length(scenario$batch_means)]
+  batch_sds_new <- scenario$batch_sds[(n_old + 1):length(scenario$batch_sds)]
+  case_prob_new <- scenario$case_prob[(n_old + 1):length(scenario$case_prob)]
+  
+  pb <- txtProgressBar(min = 0, max = n_rep, style = 3)
+  for (rep in seq_len(n_rep)) {
+    setTxtProgressBar(pb, rep)
+
+    old <- generateDataFlex(
+      G = G,
+      batch_sizes = batch_sizes_old,
+      batch_means = batch_means_old,
+      batch_sds = batch_sds_old,
+      case_prob = case_prob_old,
+      global_mean = global_mean,
+      global_sd = global_sd,
+      Delta_value = Delta_value,
+      age_mu = age_mu,
+      age_sd = age_sd,
+      age_beta = scenario$age_beta,
+      seed = 10000 * rep
+    )
+
+    newb <- generateDataFlex(
+      G = G,
+      batch_sizes = batch_sizes_new,
+      batch_means = batch_means_new,
+      batch_sds = batch_sds_new,
+      case_prob = case_prob_new,
+      global_mean = global_mean,
+      global_sd = global_sd,
+      Delta_value = Delta_value,
+      age_mu = age_mu,
+      age_sd = age_sd,
+      age_beta = scenario$age_beta,
+      seed = 20000 * rep
+    )
+
+    dat.raw <- cbind(old$dat, newb$dat)
+    
+    new_batch_labels <- character()
+    for (i in seq_along(batch_sizes_new)) {
+      new_batch_labels <- c(new_batch_labels, 
+                            rep(as.character(n_old + i), batch_sizes_new[i]))
+    }
+    batch <- factor(c(as.character(old$batch), new_batch_labels))
+    
+    group <- factor(c(as.character(old$group), as.character(newb$group)), levels = c(0, 1))
+    age <- c(old$age, newb$age)
+    
+    # (a) test for raw data
+    p_raw <- get_pvalues_age(dat.raw, group, age)
+    TPR_raw[rep] <- mean(p_raw[1:50] < alpha)
+    FPR_raw[rep] <- mean(p_raw[-(1:50)] < alpha)
+    lambda_raw[rep] <- gc_lambda(p_raw)
+    
+    # ComBat
+    mod_full <- model.matrix(~ group + age)
+    tryCatch({
+      dat_full <- ComBat(dat = dat.raw, batch = batch, mod = mod_full, 
+                         par.prior = TRUE, mean.only = FALSE)
+      p_full <- get_pvalues_age(dat_full, group, age)
+      TPR_full[rep] <- mean(p_full[1:50] < alpha)
+      FPR_full[rep] <- mean(p_full[-(1:50)] < alpha)
+      lambda_full[rep] <- gc_lambda(p_full)
+      nsv_full[rep] <- get_n_sva(dat_full, mod_full)
+    }, error = function(e) {
+      cat("\nComBat error in rep", rep, ":", e$message, "\n")
+      TPR_full[rep] <- NA
+      FPR_full[rep] <- NA
+      lambda_full[rep] <- NA
+      nsv_full[rep] <- NA
+    })
+    
+    # iComBat
+    n_old_samples <- ncol(old$dat)
+    group_old <- group[1:n_old_samples]
+    age_old <- age[1:n_old_samples]
+    mod_old <- model.matrix(~ group_old + age_old)
+    
+    tryCatch({
+      fit_old <- ComBatInitialize(dat = old$dat, batch = old$batch, 
+                                  mod = mod_old, mean.only = FALSE)
+      dat_old_corr <- ComBat(dat = old$dat, batch = old$batch, 
+                             mod = mod_old, par.prior = TRUE, mean.only = FALSE)
+
+      group_new <- group[(n_old_samples + 1):length(group)]
+      age_new <- age[(n_old_samples + 1):length(age)]
+      mod_new <- model.matrix(~ group_new + age_new)
+
+      dat_new_corr_list <- list()
+      start_idx <- 1
+      for (i in seq_along(batch_sizes_new)) {
+        end_idx <- start_idx + batch_sizes_new[i] - 1
+        batch_data <- newb$dat[, start_idx:end_idx, drop = FALSE]
+        batch_label <- factor(rep(n_old + i, batch_sizes_new[i]))
+        
+        dat_new_corr_list[[i]] <- ComBatIncremental(
+          dat.new = batch_data,
+          new.batch = batch_label,
+          fit = fit_old,
+          par.prior = TRUE,
+          mod.new = mod_new[start_idx:end_idx, , drop = FALSE]
+        )
+        start_idx <- end_idx + 1
+      }
+      dat_new_corr <- do.call(cbind, dat_new_corr_list)
+      
+      dat_incr <- cbind(dat_old_corr, dat_new_corr)
+      p_incr <- get_pvalues_age(dat_incr, group, age)
+      TPR_incr[rep] <- mean(p_incr[1:50] < alpha)
+      FPR_incr[rep] <- mean(p_incr[-(1:50)] < alpha)
+      lambda_incr[rep] <- gc_lambda(p_incr)
+      nsv_incr[rep] <- get_n_sva(dat_incr, mod_full)
+
+      if (!is.na(TPR_full[rep])) {
+        correlation_vals[rep] <- cor(dat_full[, 1], dat_incr[, 1])
+      }
+      
+    }, error = function(e) {
+      cat("\niComBat error in rep", rep, ":", e$message, "\n")
+      TPR_incr[rep] <- NA
+      FPR_incr[rep] <- NA
+      lambda_incr[rep] <- NA
+      nsv_incr[rep] <- NA
+      correlation_vals[rep] <- NA
+    })
+
+    nsv_raw[rep] <- get_n_sva(dat.raw, mod_full)
+  }
+  close(pb)
+  
+  # aggregate results
+  results <- list(
+    scenario_name = scenario$name,
+    n_samples_total = sum(scenario$batch_sizes),
+    n_batches = length(scenario$batch_sizes),
+    n_old_batches = scenario$n_old_batches,
+    n_new_batches = length(scenario$batch_sizes) - scenario$n_old_batches,
+
+    TPR_raw = mean(TPR_raw, na.rm = TRUE),
+    TPR_full = mean(TPR_full, na.rm = TRUE),
+    TPR_incr = mean(TPR_incr, na.rm = TRUE),
+
+    FPR_raw = mean(FPR_raw, na.rm = TRUE),
+    FPR_full = mean(FPR_full, na.rm = TRUE),
+    FPR_incr = mean(FPR_incr, na.rm = TRUE),
+
+    lambda_raw = mean(lambda_raw, na.rm = TRUE),
+    lambda_full = mean(lambda_full, na.rm = TRUE),
+    lambda_incr = mean(lambda_incr, na.rm = TRUE),
+
+    nsv_raw = mean(nsv_raw, na.rm = TRUE),
+    nsv_full = mean(nsv_full, na.rm = TRUE),
+    nsv_incr = mean(nsv_incr, na.rm = TRUE),
+
+    combat_icombat_cor = mean(correlation_vals, na.rm = TRUE),
+
+    success_rate_combat = mean(!is.na(TPR_full)),
+    success_rate_icombat = mean(!is.na(TPR_incr)),
+
+    raw_data = list(
+      TPR_raw = TPR_raw,
+      TPR_full = TPR_full,
+      TPR_incr = TPR_incr,
+      FPR_raw = FPR_raw,
+      FPR_full = FPR_full,
+      FPR_incr = FPR_incr,
+      lambda_raw = lambda_raw,
+      lambda_full = lambda_full,
+      lambda_incr = lambda_incr,
+      nsv_raw = nsv_raw,
+      nsv_full = nsv_full,
+      nsv_incr = nsv_incr,
+      correlation_vals = correlation_vals
+    )
+  )
+  return(results)
 }
 
-# simulation study
-n_rep <- 1000
+run_all_scenarios <- function(scenarios = systematic_scenarios, n_rep = 1000, alpha = 0.05) {
+  all_results <- list()
+  cat("=== Running All Scenarios ===\n")
+  cat(sprintf("Number of scenarios: %d\n", length(scenarios)))
+  cat(sprintf("Repetitions per scenario: %d\n", n_rep))
+  cat(sprintf("Significance level: %.3f\n\n", alpha))
+  
+  start_time <- Sys.time()
+  for (i in seq_along(scenarios)) {
+    scenario_name <- names(scenarios)[i]
+    scenario <- scenarios[[scenario_name]]
+    cat(sprintf("\n[%d/%d] ", i, length(scenarios)))
+    result <- run_scenario_simulation(scenario, n_rep = n_rep, alpha = alpha)
+    all_results[[scenario_name]] <- result
+  }
+  end_time <- Sys.time()
+  total_time <- difftime(end_time, start_time, units = "mins")
 
-TPR_raw_vec <- numeric(n_rep)
-FPR_raw_vec <- numeric(n_rep)
-TPR_full_vec <- numeric(n_rep)
-FPR_full_vec <- numeric(n_rep)
-TPR_incr_vec <- numeric(n_rep)
-FPR_incr_vec <- numeric(n_rep)
-
-batch_sizes_old <- c(50, 30, 40)
-batch_means_old <- c(0, 2.5, -2)
-batch_sds_old <- c(1, 1.5, 1.2)
-batch_sizes_new <- c(30)
-batch_means_new <- c(-4)
-batch_sds_new <- c(1.8)
-
-alpha <- 0.05 # significance level
-
-for (i in 1:n_rep) {
-  # data generation for existing batches
-  synthetic_old <- generateTestDataExperiment(
-    G = 500,
-    batch_sizes = batch_sizes_old,
-    batch_means = batch_means_old,
-    batch_sds = batch_sds_old,
-    global_mean = 5,
-    global_sd = 1,
-    seed = 1000 + i
-  )
-  dat.old <- synthetic_old$dat
-  batch.old <- synthetic_old$batch
-  group.old <- synthetic_old$group
-
-  # data generation for new batches
-  synthetic_new <- generateTestDataExperiment(
-    G = 500,
-    batch_sizes = batch_sizes_new,
-    batch_means = batch_means_new,
-    batch_sds = batch_sds_new,
-    global_mean = 5,
-    global_sd = 1,
-    seed = 2000 + i
-  )
-  dat.new <- synthetic_new$dat
-  batch.new <- factor(rep(4, ncol(dat.new)), levels = 1:4)
-  group.new <- synthetic_new$group
-
-  # non-corrected combined data
-  dat.raw.combined <- cbind(dat.old, dat.new)
-  batch.combined <- factor(c(as.character(batch.old), as.character(batch.new)), levels = 1:4)
-  group.combined <- factor(c(as.character(group.old), as.character(group.new)), levels = c(0, 1))
-
-  # (a) results: no correction
-  p_raw <- get_pvalues(dat.raw.combined, group.combined)
-
-  # (b) results: combat
-  mod_full <- model.matrix(~group, data = data.frame(group = group.combined))
-  corrected_all <- ComBat(dat = dat.raw.combined, batch = batch.combined, mod = mod_full)
-  p_full <- get_pvalues(corrected_all, group.combined)
-
-  # (c) results: icombat
-  mod_old <- model.matrix(~group, data = data.frame(group = group.old))
-  fit.old <- ComBatInitialize(
-    dat = dat.old, batch = batch.old, mod = mod_old,
-    par.prior = TRUE, mean.only = FALSE, ref.batch = NULL
-  )
-  corrected_old <- ComBat(dat = dat.old, batch = batch.old, mod = mod_old)
-  mod_new <- model.matrix(~group, data = data.frame(group = group.new))
-  corrected_new <- ComBatIncremental(
-    dat.new = dat.new, new.batch = batch.new,
-    fit = fit.old, mod.new = mod_new
-  )
-  corrected_incr <- cbind(corrected_old, corrected_new)
-  group_incr <- factor(c(as.character(group.old), as.character(group.new)), levels = c(0, 1))
-  p_incr <- get_pvalues(corrected_incr, group_incr)
-
-  TPR_raw_vec[i] <- sum(p_raw[1:50] < alpha) / 50
-  FPR_raw_vec[i] <- sum(p_raw[51:500] < alpha) / 450
-
-  TPR_full_vec[i] <- sum(p_full[1:50] < alpha) / 50
-  FPR_full_vec[i] <- sum(p_full[51:500] < alpha) / 450
-
-  TPR_incr_vec[i] <- sum(p_incr[1:50] < alpha) / 50
-  FPR_incr_vec[i] <- sum(p_incr[51:500] < alpha) / 450
+  cat(sprintf("\n\nTotal execution time: %.1f minutes\n", as.numeric(total_time)))
+  return(all_results)
 }
 
-cat("No Correction: Avg.TPR =", mean(TPR_raw_vec), " Avg.FPR =", mean(FPR_raw_vec), "\n")
-cat("Corrected by ComBat: Avg.TPR =", mean(TPR_full_vec), " Avg.FPR =", mean(FPR_full_vec), "\n")
-cat("Corrected by iComBat: Avg.TPR =", mean(TPR_incr_vec), " Avg.FPR =", mean(FPR_incr_vec), "\n")
+compare_scenarios <- function(all_results) {
+  comparison_df <- do.call(rbind, lapply(names(all_results), function(name) {
+    res <- all_results[[name]]
+    data.frame(
+      Scenario = res$scenario_name,
+      N_Total = res$n_samples_total,
+      N_Batches = res$n_batches,
+      TPR_Raw = res$TPR_raw,
+      TPR_ComBat = res$TPR_full,
+      TPR_iComBat = res$TPR_incr,
+      FPR_Raw = res$FPR_raw,
+      FPR_ComBat = res$FPR_full,
+      FPR_iComBat = res$FPR_incr,
+      Lambda_Raw = res$lambda_raw,
+      Lambda_ComBat = res$lambda_full,
+      Lambda_iComBat = res$lambda_incr,
+      nSV_Raw = res$nsv_raw,
+      nSV_ComBat = res$nsv_full,
+      nSV_iComBat = res$nsv_incr,
+      Correlation = res$combat_icombat_cor,
+      stringsAsFactors = FALSE
+    )
+  }))
+  return(comparison_df)
+}
 
-# PCA plot for last generated and corrected data
 
-# (a) no correction
-pca_raw <- prcomp(t(dat.raw.combined), scale. = FALSE)
-par(mfrow = c(1, 3))
-plot(pca_raw$x[, 1], pca_raw$x[, 2],
-  col = as.factor(batch.combined),
-  pch = 19, xlab = "PC1", ylab = "PC2",
-  main = "No Correction"
+all_results <- run_all_scenarios(n_rep = 1000)
+save(all_results, file = "all_results.RData")
+write_json(
+  all_results,
+  path       = "all_results.json",
+  pretty     = TRUE,
+  auto_unbox = TRUE
 )
-legend("topright", legend = levels(batch.combined), pch = 19, col = 1:length(levels(batch.combined)))
-
-# (b) combat
-pca_full <- prcomp(t(corrected_all), scale. = FALSE)
-plot(pca_full$x[, 1], pca_full$x[, 2],
-  col = as.factor(batch.combined),
-  pch = 19, xlab = "PC1", ylab = "PC2",
-  main = "Corrected by ComBat"
-)
-legend("topright", legend = levels(batch.combined), pch = 19, col = 1:length(levels(batch.combined)))
-
-# (c) icombat
-pca_incr <- prcomp(t(corrected_incr), scale. = FALSE)
-plot(pca_incr$x[, 1], pca_incr$x[, 2],
-  col = as.factor(c(as.character(batch.old), rep(4, ncol(corrected_new)))),
-  pch = 19, xlab = "PC1", ylab = "PC2",
-  main = "Corrected by iComBat"
-)
-legend("topright",
-  legend = unique(c(as.character(batch.old), 4)),
-  pch = 19, col = 1:length(unique(c(as.character(batch.old), 4)))
-)
-par(mfrow = c(1, 1))
