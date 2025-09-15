@@ -1,6 +1,6 @@
 # iComBat
 
-This repository is dedicated to the code availability for the paper: [**iComBat: An Incremental Framework for Batch Effect Correction in DNA Methylation Array Data**](https://doi.org/10.1101/2025.05.06.652337).
+This repository is dedicated to the code availability for the paper: [**iComBat: An Incremental Framework for Batch Effect Correction in DNA Methylation Array Data**](https://doi.org/10.1016/j.csbj.2025.09.014).
 
 ## Description
 
@@ -99,6 +99,6 @@ data A probe x sample genomic measure matrix, adjusted for batch effects.
 
 ## Citation
 
-Tomo, Y. & Nakaki, R. (2025). iComBat: An Incremental Framework for Batch Effect Correction in DNA Methylation Array Data. *bioRxiv*. 
+Tomo, Y. & Nakaki, R. (2025). iComBat: An Incremental Framework for Batch Effect Correction in DNA Methylation Array Data. *Computational and Structural Biotechnology Journal*, In Press. 
 
 © Yui Tomo, Ryo Nakaki (2025).
